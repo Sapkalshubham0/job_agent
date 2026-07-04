@@ -6,5 +6,5 @@ google-cloud-firestore
 python-telegram-bot
 flask
 gunicorn
-google-oauth2
+google-auth
 
