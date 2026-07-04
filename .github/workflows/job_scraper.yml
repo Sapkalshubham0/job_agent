@@ -1,0 +1,33 @@
+name: AI Job Hunter Agent
+
+on:
+  schedule:
+    # Runs automatically every 30 minutes
+    - cron: '*/30 * * * *' 
+  workflow_dispatch: 
+    # This allows you to manually trigger the script from the GitHub Actions tab
+
+jobs:
+  run-scraper:
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+          
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+          
+      - name: Run Job Hunter Script
+        env:
+          # Pulling your hidden secrets into the environment variables
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          FIREBASE_SERVICE_ACCOUNT: ${{ secrets.FIREBASE_SERVICE_ACCOUNT }}
+        run: python job_agent.py
