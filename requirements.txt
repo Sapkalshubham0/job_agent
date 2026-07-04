@@ -3,3 +3,4 @@ google-genai
 requests
 pandas
 google-cloud-firestore
+python-telegram-bot
