@@ -141,7 +141,7 @@ def main():
             search_term=search_query,
             location=location,
             results_wanted=15, 
-            hours_old=1,       
+            hours_old=48,       
             country_indeed='India'
         )
         
