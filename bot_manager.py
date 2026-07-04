@@ -95,8 +95,7 @@ def main():
     
     # 2. Start the Telegram Bot Polling engine
     print("Starting the Telegram Bot Listener...")
-    app = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
-    
+    app = Application.builder().token(TELEGRAM_BOT_TOKEN).connect_timeout(30.0).read_timeout(30.0).build()    
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("register", register))
     app.add_handler(CommandHandler("stop", stop))
