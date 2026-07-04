@@ -3,7 +3,7 @@ name: AI Job Hunter Agent
 on:
   schedule:
     # Runs automatically every 30 minutes
-    - cron: '*/45 * * * *' 
+    - cron: '14,44 * * * *'
   workflow_dispatch: 
     # This allows you to manually trigger the script from the GitHub Actions tab
 
