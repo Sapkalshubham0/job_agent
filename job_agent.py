@@ -8,14 +8,23 @@ from google.cloud import firestore
 from google.oauth2 import service_account
 
 # --- Configuration & Secrets ---
-# These must be set in your GitHub Actions Repository Secrets
 TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID")
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
 FIREBASE_CREDS_JSON = os.environ.get("FIREBASE_SERVICE_ACCOUNT")
 
-# Define your core search parameters
-SEARCH_TERMS = ["Data Analyst", "Data Engineer", "Python Developer"]
+# Define your broad data-focused search parameters
+SEARCH_TERMS = [
+    "Power BI Developer", 
+    "Data Analyst", 
+    "Business Analyst", 
+    "MIS", 
+    "Excel", 
+    "SQL", 
+    "Python Data Analyst", 
+    "Data Scientist",
+    "Data Engineer"
+]
 LOCATION = "Pune, India"
 
 def get_firestore_client():
@@ -37,15 +46,16 @@ def parse_and_filter_job(job_description, title, company, default_url):
     
     prompt = f"""
     You are an expert recruitment automation assistant. 
-    Review this job post for a candidate specializing in SQL, Power BI, and Python.
-    They are looking for entry-level roles or short-term internships.
+    Review this job post for a candidate specializing in data fields, including:
+    Power BI, Data Analytics, Business Analytics, MIS, Excel, SQL, Python, and Data Science.
+    They are looking for entry-level roles, junior positions, or short-term internships.
     
     Job Title: {title}
     Company: {company}
     Job Description: {job_description[:3000]}
     
     Tasks:
-    1. Determine if this is a strong match based ONLY on the candidate's skills and experience level (true/false).
+    1. Determine if this is a strong match based on the candidate's skills (SQL, Power BI, Excel, Python, MIS/reporting tools) and an entry-level or junior experience bracket (true/false).
     2. Extract any specific HR email addresses mentioned for application submissions.
     3. Extract any contact phone numbers mentioned.
     4. Extract any external application links mentioned in the text (if none, use '{default_url}').
@@ -71,20 +81,19 @@ def parse_and_filter_job(job_description, title, company, default_url):
         return {"is_match": False}
 
 def save_to_database(db, job_data):
-    """Saves the record to Firestore to mirror your tracking spreadsheet."""
+    """Saves the record to Firestore to prevent duplicate alerts."""
     if db is None:
         return False
         
     try:
-        # Create a unique document ID based on company and date to prevent duplicates
-        doc_id = f"{job_data['Company']}_{job_data['Date']}".replace(" ", "_").replace("/", "-")
+        # Create a unique document ID based on company and title to prevent duplicates across runs
+        doc_id = f"{job_data['Company']}_{job_data['Title']}_{job_data['Date']}".replace(" ", "_").replace("/", "-")
         doc_ref = db.collection("job_applications").document(doc_id)
         
-        # If this exact job was already logged today, skip it
+        # If this job was already logged today, skip it
         if doc_ref.get().exists:
             return False
             
-        # Write to Firestore matching your spreadsheet columns
         doc_ref.set(job_data)
         return True
     except Exception as e:
@@ -113,11 +122,14 @@ def main():
         print("Warning: Database client failed to initialize. Check FIREBASE_SERVICE_ACCOUNT secret.")
     
     # 2. Scrape Jobs
+    # Constructs search query like: "Power BI Developer OR Data Analyst OR Business Analyst..."
+    search_query = " OR ".join([f'"{term}"' if ' ' in term else term for term in SEARCH_TERMS])
+    
     jobs_df = scrape_jobs(
         site_name=["linkedin"], 
-        search_term=" OR ".join(SEARCH_TERMS),
+        search_term=search_query,
         location=LOCATION,
-        results_wanted=15, 
+        results_wanted=25,  # Slightly bumped up to accommodate broader search terms
         hours_old=1,       
         country_indeed='India'
     )
@@ -143,7 +155,7 @@ def main():
         if extracted.get("is_match"):
             match_count += 1
             
-            # Prepare data to match your spreadsheet columns exactly
+            # Prepare data
             job_record = {
                 "Date": today_str,
                 "Type": "Email", 
@@ -151,7 +163,6 @@ def main():
                 "Link": extracted.get("link", job_url),
                 "Email": extracted.get("email", "-"),
                 "Phone": extracted.get("phone", "-"),
-                # Adding these two for better database context
                 "Company": company,
                 "Title": title
             }
@@ -181,4 +192,3 @@ if __name__ == "__main__":
         print("CRITICAL: Missing one or more API keys in environment variables!")
     else:
         main()
-        
