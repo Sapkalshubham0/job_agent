@@ -1,5 +1,6 @@
 import os
 import json
+import base64
 from datetime import datetime
 import requests
 from jobspy import scrape_jobs
@@ -9,44 +10,55 @@ from google.oauth2 import service_account
 
 # --- Configuration & Secrets ---
 TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
-TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID")
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
 FIREBASE_CREDS_JSON = os.environ.get("FIREBASE_SERVICE_ACCOUNT")
 
-# Define your broad data-focused search parameters
-SEARCH_TERMS = [
-    "Power BI Developer", 
-    "Data Analyst", 
-    "Business Analyst", 
-    "MIS", 
-    "Excel", 
-    "SQL", 
-    "Python Data Analyst", 
-    "Data Scientist",
-    "Data Engineer"
-]
-LOCATION = "Pune, India"
-
 def get_firestore_client():
-    """Initializes Firestore using the JSON string from GitHub secrets."""
+    """Initializes Firestore, handling both Base64 and raw JSON formats."""
     try:
-        creds_dict = json.loads(FIREBASE_CREDS_JSON)
+        raw_creds = FIREBASE_CREDS_JSON
+        if not raw_creds:
+            print("Error: FIREBASE_SERVICE_ACCOUNT environment variable is missing.")
+            return None
+
+        # Try to decode assuming it's Base64
+        try:
+            decoded_str = base64.b64decode(raw_creds).decode('utf-8')
+            creds_dict = json.loads(decoded_str)
+        except Exception:
+            # Fallback to raw JSON
+            creds_dict = json.loads(raw_creds)
+            
         credentials = service_account.Credentials.from_service_account_info(creds_dict)
         return firestore.Client(credentials=credentials)
     except Exception as e:
         print(f"Error initializing Firestore: {e}")
         return None
 
-def parse_and_filter_job(job_description, title, company, default_url):
-    """Uses Gemini to evaluate the job and extract a reason & contact details."""
+def fetch_active_users(db):
+    """Fetches all registered and active users from Firestore."""
+    users = []
+    try:
+        docs = db.collection("users").where("active", "==", True).stream()
+        for doc in docs:
+            users.append(doc.to_dict())
+    except Exception as e:
+        print(f"Error fetching users: {e}")
+    return users
+
+def parse_and_filter_job(job_description, title, company, default_url, user_search_terms):
+    """Uses Gemini to evaluate the job based on a specific user's requirements."""
     if not job_description:
         return {"is_match": False, "reason": "No job description provided."}
         
     client = genai.Client(api_key=GEMINI_API_KEY)
     
+    # Inject the user's specific search terms into the AI prompt
+    terms_string = ", ".join(user_search_terms)
+    
     prompt = f"""
     You are an expert recruitment automation assistant. 
-    Review this job post for a candidate specializing in data fields (Power BI, Analytics, MIS, Excel, SQL, Python).
+    Review this job post for a candidate looking for roles related to: {terms_string}.
     They are looking for entry-level roles, junior positions, or short-term internships.
     
     Job Title: {title}
@@ -54,8 +66,8 @@ def parse_and_filter_job(job_description, title, company, default_url):
     Job Description: {job_description[:3000]}
     
     Tasks:
-    1. Determine if this is a strong match based on the candidate's skills and an entry-level/junior experience level (true/false).
-    2. Provide a brief, 1-2 sentence 'reason' explaining exactly WHY it is or isn't a match (e.g., 'Requires 5 years experience', 'Not a data role').
+    1. Determine if this is a strong match based on the candidate's specific keywords ({terms_string}) and an entry-level/junior experience level (true/false).
+    2. Provide a brief, 1-2 sentence 'reason' explaining exactly WHY it is or isn't a match.
     3. Extract any specific HR email addresses mentioned.
     4. Extract any contact phone numbers mentioned.
     5. Extract any external application links mentioned (if none, use '{default_url}').
@@ -81,17 +93,16 @@ def parse_and_filter_job(job_description, title, company, default_url):
         print(f"Gemini API Error: {e}")
         return {"is_match": False, "reason": "AI processing failed."}
 
-def save_to_database(db, job_data):
-    """Saves the record to Firestore to prevent duplicate alerts."""
+def save_to_database(db, job_data, chat_id):
+    """Saves the record to Firestore, tracking duplicates per user."""
     if db is None:
         return False
         
     try:
-        # Create a unique document ID based on company and title to prevent duplicates across runs
-        doc_id = f"{job_data['Company']}_{job_data['Title']}_{job_data['Date']}".replace(" ", "_").replace("/", "-")
+        # Include chat_id so duplicates are tracked per person
+        doc_id = f"{chat_id}_{job_data['Company']}_{job_data['Title']}_{job_data['Date']}".replace(" ", "_").replace("/", "-")
         doc_ref = db.collection("job_applications").document(doc_id)
         
-        # If this job was already logged today, skip it
         if doc_ref.get().exists:
             return False
             
@@ -101,109 +112,125 @@ def save_to_database(db, job_data):
         print(f"Database Save Error: {e}")
         return False
 
-def send_telegram_message(message):
-    """Sends a notification via Telegram Bot."""
+def send_telegram_message(message, chat_id):
+    """Sends a notification to a specific user via Telegram."""
     url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
     payload = {
-        "chat_id": TELEGRAM_CHAT_ID,
+        "chat_id": chat_id,
         "text": message,
         "parse_mode": "HTML"
     }
     try:
         requests.post(url, json=payload).raise_for_status()
     except requests.exceptions.RequestException as e:
-        print(f"Telegram Error: {e}")
+        print(f"Telegram Error sending to {chat_id}: {e}")
 
 def main():
-    print(f"Starting job scrape for {LOCATION}...")
-    
-    # 1. Initialize Database
     db = get_firestore_client()
     if not db:
-        print("Warning: Database client failed to initialize. Check FIREBASE_SERVICE_ACCOUNT secret.")
-    
-    # 2. Scrape Jobs
-    search_query = " OR ".join([f'"{term}"' if ' ' in term else term for term in SEARCH_TERMS])
-    
-    jobs_df = scrape_jobs(
-        site_name=["linkedin"], 
-        search_term=search_query,
-        location=LOCATION,
-        results_wanted=25,
-        hours_old=1,       
-        country_indeed='India'
-    )
-    
-    if jobs_df.empty:
-        print("No new jobs found in this run.")
+        print("CRITICAL: Database failed to initialize.")
         return
 
-    print(f"Found {len(jobs_df)} jobs. Analyzing with Gemini...")
-    today_str = datetime.today().strftime('%d-%m-%Y')
-    match_count = 0
+    users = fetch_active_users(db)
+    if not users:
+        print("No active users found in the database. Exiting.")
+        return
 
-    # 3. Process each job
-    for _, row in jobs_df.iterrows():
-        title = row.get('title', 'Unknown Title')
-        company = row.get('company', 'Unknown Company')
-        job_url = row.get('job_url', '#')
-        description = row.get('description', '')
+    print(f"Found {len(users)} active users. Starting batch processing...")
+    today_str = datetime.today().strftime('%d-%m-%Y')
+
+    # Loop through every registered person
+    for user in users:
+        chat_id = user.get("chat_id")
+        user_name = user.get("name", "User")
+        location = user.get("location", "India")
+        search_terms = user.get("search_terms", [])
         
-        # Analyze with AI
-        extracted = parse_and_filter_job(description, title, company, job_url)
-        is_match = extracted.get("is_match", False)
-        reason = extracted.get("reason", "No reason provided.")
+        print(f"\n--- Scraping for {user_name} in {location} ---")
         
-        if is_match:
-            match_count += 1
+        if not search_terms:
+            print(f"Skipping {user_name} - No search terms defined.")
+            continue
             
-        # Prepare data (saving everything to DB now)
-        job_record = {
-            "Date": today_str,
-            "Type": "Email", 
-            "Application Status": "Applied" if is_match else "Rejected by AI",
-            "Link": extracted.get("link", job_url),
-            "Email": extracted.get("email", "-"),
-            "Phone": extracted.get("phone", "-"),
-            "Company": company,
-            "Title": title,
-            "Is Match": is_match,
-            "Reason": reason
-        }
+        search_query = " OR ".join([f'"{term}"' if ' ' in term else term for term in search_terms])
         
-        # 4. Save to Database
-        is_new = save_to_database(db, job_record)
+        try:
+            jobs_df = scrape_jobs(
+                site_name=["linkedin"], 
+                search_term=search_query,
+                location=location,
+                results_wanted=15, 
+                hours_old=1,       
+                country_indeed='India'
+            )
+        except Exception as e:
+            print(f"Scraper error for {user_name}: {e}")
+            continue
         
-        # 5. Send Alert (Only if it's a new database entry, regardless of match status)
-        if is_new:
+        if jobs_df is None or jobs_df.empty:
+            print(f"No new jobs found for {user_name}.")
+            continue
+
+        print(f"Found {len(jobs_df)} jobs for {user_name}. Analyzing with Gemini...")
+        match_count = 0
+        
+        for _, row in jobs_df.iterrows():
+            title = row.get('title', 'Unknown Title')
+            company = row.get('company', 'Unknown Company')
+            job_url = row.get('job_url', '#')
+            description = row.get('description', '')
+            
+            extracted = parse_and_filter_job(description, title, company, job_url, search_terms)
+            is_match = extracted.get("is_match", False)
+            reason = extracted.get("reason", "No reason provided.")
+            
             if is_match:
-                msg = (
-                    f"🚨 <b>New Job Match Logged!</b>\n\n"
-                    f"💼 <b>Role:</b> {title}\n"
-                    f"🏢 <b>Company:</b> {company}\n"
-                    f"📧 <b>HR Email:</b> {job_record['Email']}\n"
-                    f"📞 <b>Phone:</b> {job_record['Phone']}\n\n"
-                    f"✅ <b>Why it matches:</b> {reason}\n\n"
-                    f"<a href='{job_record['Link']}'>Apply Here</a>"
-                )
+                match_count += 1
+            
+            job_record = {
+                "Date": today_str,
+                "User": user_name,
+                "Type": "Email", 
+                "Application Status": "Applied" if is_match else "Rejected by AI",
+                "Link": extracted.get("link", job_url),
+                "Email": extracted.get("email", "-"),
+                "Phone": extracted.get("phone", "-"),
+                "Company": company,
+                "Title": title,
+                "Is Match": is_match,
+                "Reason": reason
+            }
+            
+            is_new = save_to_database(db, job_record, chat_id)
+            
+            if is_new:
+                if is_match:
+                    msg = (
+                        f"🚨 <b>New Job Match for {user_name}!</b>\n\n"
+                        f"💼 <b>Role:</b> {title}\n"
+                        f"🏢 <b>Company:</b> {company}\n"
+                        f"📧 <b>HR Email:</b> {job_record['Email']}\n\n"
+                        f"✅ <b>Why it matches:</b> {reason}\n\n"
+                        f"<a href='{job_record['Link']}'>Apply Here</a>"
+                    )
+                else:
+                    msg = (
+                        f"⚠️ <b>Irrelevant Job Found for {user_name}</b>\n\n"
+                        f"💼 <b>Role:</b> {title}\n"
+                        f"🏢 <b>Company:</b> {company}\n\n"
+                        f"❌ <b>Why it was rejected:</b> {reason}\n\n"
+                        f"<a href='{job_record['Link']}'>View Anyway</a>"
+                    )
+                    
+                send_telegram_message(msg, chat_id)
+                print(f"Sent alert to {user_name} for {company}.")
             else:
-                msg = (
-                    f"⚠️ <b>Irrelevant Job Found</b>\n\n"
-                    f"💼 <b>Role:</b> {title}\n"
-                    f"🏢 <b>Company:</b> {company}\n\n"
-                    f"❌ <b>Why it was rejected:</b> {reason}\n\n"
-                    f"<a href='{job_record['Link']}'>View Anyway</a>"
-                )
+                print(f"Skipped duplicate alert for {company}.")
                 
-            send_telegram_message(msg)
-            print(f"Logged & Sent alert for: {title} at {company} (Match: {is_match})")
-        else:
-            print(f"Skipped duplicate alert for: {title} at {company}")
-                
-    print(f"Finished. Processed {match_count} relevant matches out of {len(jobs_df)} total jobs.")
+        print(f"Finished processing for {user_name}: {match_count} relevant matches.")
 
 if __name__ == "__main__":
-    if not all([TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID, GEMINI_API_KEY, FIREBASE_CREDS_JSON]):
+    if not all([TELEGRAM_BOT_TOKEN, GEMINI_API_KEY, FIREBASE_CREDS_JSON]):
         print("CRITICAL: Missing one or more API keys in environment variables!")
     else:
         main()
