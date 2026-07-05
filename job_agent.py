@@ -95,10 +95,10 @@ def parse_and_filter_job(job_description, title, company, default_url, user_sear
     for idx, key in enumerate(VALID_KEYS):
         try:
             response = requests.post(
-                url="[https://openrouter.ai/api/v1/chat/completions](https://openrouter.ai/api/v1/chat/completions)",
+                url="https://openrouter.ai/api/v1/chat/completions",
                 headers={
                     "Authorization": f"Bearer {key}",
-                    "HTTP-Referer": "[https://github.com/Sapkalshubham0/job_agent](https://github.com/Sapkalshubham0/job_agent)",
+                    "HTTP-Referer": "https://github.com/Sapkalshubham0/job_agent",
                     "X-Title": "AI Job Hunter SaaS",
                     "Content-Type": "application/json"
                 },
@@ -166,7 +166,7 @@ def save_to_database(db, job_data, chat_id):
         return False
 
 def send_telegram_message(message, chat_id):
-    url = f"[https://api.telegram.org/bot](https://api.telegram.org/bot){TELEGRAM_BOT_TOKEN}/sendMessage"
+    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
     payload = {"chat_id": chat_id, "text": message, "parse_mode": "HTML"}
     try:
         response = requests.post(url, json=payload)
