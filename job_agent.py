@@ -95,10 +95,10 @@ def parse_and_filter_job(job_description, title, company, default_url, user_sear
     for idx, key in enumerate(VALID_KEYS):
         try:
             response = requests.post(
-                url="https://openrouter.ai/api/v1/chat/completions",
+                url="[https://openrouter.ai/api/v1/chat/completions](https://openrouter.ai/api/v1/chat/completions)",
                 headers={
                     "Authorization": f"Bearer {key}",
-                    "HTTP-Referer": "https://github.com/Sapkalshubham0/job_agent",
+                    "HTTP-Referer": "[https://github.com/Sapkalshubham0/job_agent](https://github.com/Sapkalshubham0/job_agent)",
                     "X-Title": "AI Job Hunter SaaS",
                     "Content-Type": "application/json"
                 },
@@ -112,7 +112,15 @@ def parse_and_filter_job(job_description, title, company, default_url, user_sear
             
             response.raise_for_status() 
             
-            result_text = response.json()['choices'][0]['message']['content'].strip()
+            # Safely extract content to handle API returning None/null during rate limits
+            response_json = response.json()
+            raw_content = response_json.get('choices', [{}])[0].get('message', {}).get('content')
+            
+            if raw_content is None:
+                raise ValueError("API returned null content (likely rate-limited).")
+                
+            result_text = raw_content.strip()
+            
             if result_text.startswith("```json"):
                 result_text = result_text[7:-3].strip()
             elif result_text.startswith("```"):
@@ -129,9 +137,10 @@ def parse_and_filter_job(job_description, title, company, default_url, user_sear
                 last_error = str(e)
             print(f"Key {idx + 1} failed: {last_error[:200]}... Cascading to next key...")
             time.sleep(2) 
-        except (json.JSONDecodeError, KeyError) as e:
-            last_error = "Failed to parse JSON from AI response."
-            print(f"Key {idx + 1} returned invalid JSON. Cascading to next key...")
+            
+        except (json.JSONDecodeError, KeyError, ValueError) as e:
+            last_error = f"Failed to parse valid data from AI response: {str(e)}"
+            print(f"Key {idx + 1} returned invalid data. Cascading to next key...")
             time.sleep(2)
             
     # FAIL-SAFE TRIGGERED
@@ -157,7 +166,7 @@ def save_to_database(db, job_data, chat_id):
         return False
 
 def send_telegram_message(message, chat_id):
-    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
+    url = f"[https://api.telegram.org/bot](https://api.telegram.org/bot){TELEGRAM_BOT_TOKEN}/sendMessage"
     payload = {"chat_id": chat_id, "text": message, "parse_mode": "HTML"}
     try:
         response = requests.post(url, json=payload)
