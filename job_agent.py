@@ -2,6 +2,7 @@ import os
 import json
 import base64
 import time
+import html  # Added to safely format job descriptions for Telegram
 from datetime import datetime
 import requests
 from jobspy import scrape_jobs
@@ -54,7 +55,7 @@ def fetch_active_users(db):
     return users
 
 def parse_and_filter_job(job_description, title, company, default_url, user_search_terms):
-    """Uses OpenRouter's Llama 3.3 70B model to evaluate jobs with fallback logic."""
+    """Uses OpenRouter to evaluate jobs with fallback logic."""
     if not VALID_KEYS:
         return {"is_match": False, "ai_failed": True, "reason": "System Error: No OpenRouter API keys configured.", "email": "-", "phone": "-", "link": default_url}
         
@@ -89,7 +90,7 @@ def parse_and_filter_job(job_description, title, company, default_url, user_sear
     """
     
     last_error = ""
-    model_to_use = "meta-llama/llama-3.3-70b-instruct:free"
+    model_to_use = "openrouter/free"
 
     for idx, key in enumerate(VALID_KEYS):
         try:
@@ -118,7 +119,7 @@ def parse_and_filter_job(job_description, title, company, default_url, user_sear
                 result_text = result_text[3:-3].strip()
                 
             parsed_json = json.loads(result_text)
-            parsed_json["ai_failed"] = False # Tag to confirm successful AI processing
+            parsed_json["ai_failed"] = False 
             return parsed_json
         
         except requests.exceptions.RequestException as e:
@@ -133,7 +134,7 @@ def parse_and_filter_job(job_description, title, company, default_url, user_sear
             print(f"Key {idx + 1} returned invalid JSON. Cascading to next key...")
             time.sleep(2)
             
-    # FAIL-SAFE TRIGGERED: All keys failed. Return the raw data and flag it as a failure.
+    # FAIL-SAFE TRIGGERED
     return {
         "is_match": False, 
         "ai_failed": True, 
@@ -144,7 +145,6 @@ def parse_and_filter_job(job_description, title, company, default_url, user_sear
     }
 
 def save_to_database(db, job_data, chat_id):
-    """Saves the record to Firestore, tracking duplicates per user."""
     if db is None: return False
     try:
         doc_id = f"{chat_id}_{job_data['Company']}_{job_data['Title']}_{job_data['Date']}".replace(" ", "_").replace("/", "-")
@@ -157,11 +157,12 @@ def save_to_database(db, job_data, chat_id):
         return False
 
 def send_telegram_message(message, chat_id):
-    """Sends a notification to a specific user via Telegram."""
     url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
     payload = {"chat_id": chat_id, "text": message, "parse_mode": "HTML"}
     try:
-        requests.post(url, json=payload)
+        response = requests.post(url, json=payload)
+        if response.status_code != 200:
+            print(f"TELEGRAM FAILED! Status: {response.status_code}, Body: {response.text}")
     except requests.exceptions.RequestException as e:
         print(f"Telegram Error sending to {chat_id}: {e}")
 
@@ -215,7 +216,7 @@ def main():
             
             extracted = parse_and_filter_job(description, title, company, job_url, search_terms)
             is_match = extracted.get("is_match", False)
-            ai_failed = extracted.get("ai_failed", False) # Check if the fail-safe was triggered
+            ai_failed = extracted.get("ai_failed", False) 
             reason = extracted.get("reason", "No reason provided.")
             
             if is_match and not ai_failed: 
@@ -231,38 +232,42 @@ def main():
             
             if save_to_database(db, job_record, chat_id):
                 
-                # Condition 2: If AI Processing Fails (Fail-Safe Message)
+                # Condition 2: If AI Processing Fails (Sends Raw Description)
                 if ai_failed:
-                    msg = (f"⚠️ <b>[AI Processing Failed] Manual Review Required</b>\n\n"
-                           f"<i>The AI is currently overloaded, but here is the raw job info so you don't miss out:</i>\n\n"
-                           f"💼 <b>Role:</b> {title}\n"
-                           f"🏢 <b>Company:</b> {company}\n"
-                           f"📍 <b>Location:</b> {job_location}\n\n"
-                           f"<a href='{job_record['Link']}'>View Job Description & Apply</a>")
+                    # Safely escape HTML characters and truncate to 1500 chars to respect Telegram limits
+                    safe_desc = html.escape(str(description))
+                    short_desc = safe_desc[:1500] + "...\n[Truncated]" if len(safe_desc) > 1500 else safe_desc
+                    
+                    msg = (f"⚠️ <b>[AI Processing Failed] Raw Job Info</b>\n\n"
+                           f"💼 <b>Role:</b> {html.escape(title)}\n"
+                           f"🏢 <b>Company:</b> {html.escape(company)}\n"
+                           f"📍 <b>Location:</b> {html.escape(job_location)}\n\n"
+                           f"📝 <b>Job Description Snippet:</b>\n<i>{short_desc}</i>\n\n"
+                           f"<a href='{job_record['Link']}'>View Full Job & Apply</a>")
                 
                 # Condition 3: AI Succeeds and finds a Match
                 elif is_match:
                     msg = (f"🚨 <b>New Job Match for {user_name}!</b>\n\n"
-                           f"💼 <b>Role:</b> {title}\n"
-                           f"🏢 <b>Company:</b> {company}\n"
-                           f"📍 <b>Location:</b> {job_location}\n"
+                           f"💼 <b>Role:</b> {html.escape(title)}\n"
+                           f"🏢 <b>Company:</b> {html.escape(company)}\n"
+                           f"📍 <b>Location:</b> {html.escape(job_location)}\n"
                            f"📧 <b>HR Email:</b> {job_record['Email']}\n\n"
-                           f"✅ <b>Why it matches:</b> {reason}\n\n"
+                           f"✅ <b>Why it matches:</b> {html.escape(reason)}\n\n"
                            f"<a href='{job_record['Link']}'>Apply Here</a>")
                 
                 # Condition 1: AI Succeeds and Rejects it
                 else:
                     msg = (f"❌ <b>Irrelevant Job Found for {user_name}</b>\n\n"
-                           f"💼 <b>Role:</b> {title}\n"
-                           f"🏢 <b>Company:</b> {company}\n"
-                           f"📍 <b>Location:</b> {job_location}\n\n"
-                           f"❌ <b>Why it was rejected:</b> {reason}\n\n"
+                           f"💼 <b>Role:</b> {html.escape(title)}\n"
+                           f"🏢 <b>Company:</b> {html.escape(company)}\n"
+                           f"📍 <b>Location:</b> {html.escape(job_location)}\n\n"
+                           f"❌ <b>Why it was rejected:</b> {html.escape(reason)}\n\n"
                            f"<a href='{job_record['Link']}'>View Anyway</a>")
                     
                 send_telegram_message(msg, chat_id)
                 print(f"Sent alert to {user_name} for {company} (AI Failed: {ai_failed}).")
                 
-            time.sleep(3) # Short pause to respect OpenRouter rate limits
+            time.sleep(3) 
                 
         print(f"Finished processing for {user_name}: {match_count} relevant matches.")
 
