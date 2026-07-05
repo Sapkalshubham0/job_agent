@@ -19,7 +19,9 @@ FIREBASE_CREDS_JSON = os.environ.get("FIREBASE_SERVICE_ACCOUNT")
 API_KEYS = [
     os.environ.get("GEMINI_API_KEY_1"),
     os.environ.get("GEMINI_API_KEY_2"),
-    os.environ.get("GEMINI_API_KEY_3")
+    os.environ.get("GEMINI_API_KEY_3"),
+    os.environ.get("GEMINI_API_KEY_4"),
+    os.environ.get("GEMINI_API_KEY_5")
 ]
 
 # Filter out empty keys and create an infinite rotating pool
