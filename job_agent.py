@@ -151,7 +151,7 @@ def save_to_database(db, job_data, chat_id):
 
 def send_telegram_message(message, chat_id):
     """Sends a notification to a specific user via Telegram."""
-    url = f"https://api.telegram.org/bot){TELEGRAM_BOT_TOKEN}/sendMessage"
+    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
     payload = {"chat_id": chat_id, "text": message, "parse_mode": "HTML"}
     try:
         requests.post(url, json=payload)
