@@ -13,14 +13,13 @@ TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
 FIREBASE_CREDS_JSON = os.environ.get("FIREBASE_SERVICE_ACCOUNT")
 
 # --- OpenRouter Waterfall Setup ---
-# You can generate free keys at https://openrouter.ai/keys
 API_KEYS = [
     os.environ.get("OPENROUTER_API_KEY_1"),
     os.environ.get("OPENROUTER_API_KEY_2"),
     os.environ.get("OPENROUTER_API_KEY_3")
 ]
 
-# Filter out empty keys so it only tries the ones you actually provided
+# Filter out empty keys
 VALID_KEYS = [key for key in API_KEYS if key and key.strip()]
 
 def get_firestore_client():
@@ -55,7 +54,7 @@ def fetch_active_users(db):
     return users
 
 def parse_and_filter_job(job_description, title, company, default_url, user_search_terms):
-    """Uses OpenRouter's free dynamic endpoint to evaluate jobs with fallback logic."""
+    """Uses OpenRouter's Llama 3.3 70B model to evaluate jobs with fallback logic."""
     if not VALID_KEYS:
         return {"is_match": False, "reason": "System Error: No OpenRouter API keys configured."}
         
@@ -90,31 +89,30 @@ def parse_and_filter_job(job_description, title, company, default_url, user_sear
     """
     
     last_error = ""
-    # Use the dynamic free router to automatically find an online, capable free model
-    models_to_try = ["openrouter/free"]
+    # Using the specific high-intelligence model requested
+    model_to_use = "meta-llama/llama-3.3-70b-instruct:free"
 
     for idx, key in enumerate(VALID_KEYS):
-        model = models_to_try[0] 
-        
         try:
-            # FIX: Removed the markdown brackets from the URL string
             response = requests.post(
                 url="[https://openrouter.ai/api/v1/chat/completions](https://openrouter.ai/api/v1/chat/completions)",
                 headers={
                     "Authorization": f"Bearer {key}",
                     "HTTP-Referer": "[https://github.com/Sapkalshubham0/job_agent](https://github.com/Sapkalshubham0/job_agent)",
+                    "X-Title": "AI Job Hunter SaaS",
                     "Content-Type": "application/json"
                 },
                 json={
-                    "model": model,
-                    "messages": [{"role": "user", "content": prompt}]
+                    "model": model_to_use,
+                    "messages": [{"role": "user", "content": prompt}],
+                    "response_format": {"type": "json_object"}
                 },
-                timeout=15
+                timeout=20  # Increased to 20s to accommodate the 70B model's response time
             )
             
             response.raise_for_status() 
             
-            # Extract text and clean up any accidental markdown blocks open-source models might add
+            # Extract text and clean up any accidental markdown blocks
             result_text = response.json()['choices'][0]['message']['content'].strip()
             if result_text.startswith("```json"):
                 result_text = result_text[7:-3].strip()
@@ -123,10 +121,18 @@ def parse_and_filter_job(job_description, title, company, default_url, user_sear
                 
             return json.loads(result_text)
         
-        except Exception as e:
-            last_error = str(e)
-            print(f"Key {idx + 1} failed: {last_error}. Cascading...")
+        except requests.exceptions.RequestException as e:
+            # Capture the exact OpenRouter error body if they reject the request
+            if hasattr(e, 'response') and e.response is not None:
+                last_error = f"{e.response.status_code} - {e.response.text}"
+            else:
+                last_error = str(e)
+            print(f"Key {idx + 1} failed: {last_error[:200]}... Cascading to next key...")
             time.sleep(2) 
+        except json.JSONDecodeError:
+            last_error = "Failed to parse JSON from AI response."
+            print(f"Key {idx + 1} returned invalid JSON. Cascading to next key...")
+            time.sleep(2)
             
     return {"is_match": False, "reason": f"AI processing failed. Exact error: {last_error[:100]}"}
 
@@ -145,7 +151,6 @@ def save_to_database(db, job_data, chat_id):
 
 def send_telegram_message(message, chat_id):
     """Sends a notification to a specific user via Telegram."""
-    # FIX: Removed the markdown brackets from the URL string
     url = f"[https://api.telegram.org/bot](https://api.telegram.org/bot){TELEGRAM_BOT_TOKEN}/sendMessage"
     payload = {"chat_id": chat_id, "text": message, "parse_mode": "HTML"}
     try:
@@ -227,7 +232,7 @@ def main():
                 send_telegram_message(msg, chat_id)
                 print(f"Sent alert to {user_name} for {company}.")
                 
-            time.sleep(3) # Short pause between requests
+            time.sleep(3) # Short pause to respect OpenRouter rate limits
                 
         print(f"Finished processing for {user_name}: {match_count} relevant matches.")
 
