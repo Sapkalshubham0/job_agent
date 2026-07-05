@@ -83,7 +83,7 @@ def parse_and_filter_job(job_description, title, company, default_url, user_sear
     
     try:
         response = client.models.generate_content(
-            model="gemini-2.5-flash",
+            model="gemini-3.1-flash-lite",
             contents=prompt,
             config={"response_mime_type": "application/json"}
         )
