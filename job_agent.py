@@ -2,7 +2,6 @@ import os
 import json
 import base64
 import time
-import itertools
 from datetime import datetime
 import requests
 from jobspy import scrape_jobs
@@ -14,8 +13,8 @@ from google.oauth2 import service_account
 TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
 FIREBASE_CREDS_JSON = os.environ.get("FIREBASE_SERVICE_ACCOUNT")
 
-# --- API Key Pool Setup ---
-# Add as many keys as you want to this list in your GitHub Secrets
+# --- 5-Key Waterfall Setup ---
+# The script will try these in order. If one fails, it cascades to the next.
 API_KEYS = [
     os.environ.get("GEMINI_API_KEY_1"),
     os.environ.get("GEMINI_API_KEY_2"),
@@ -24,13 +23,8 @@ API_KEYS = [
     os.environ.get("GEMINI_API_KEY_5")
 ]
 
-# Filter out empty keys and create an infinite rotating pool
+# Filter out empty keys so it only tries the ones you actually provided
 VALID_KEYS = [key for key in API_KEYS if key and key.strip()]
-if VALID_KEYS:
-    KEY_POOL = itertools.cycle(VALID_KEYS)
-else:
-    KEY_POOL = None
-
 
 def get_firestore_client():
     """Initializes Firestore, handling both Base64 and raw JSON formats."""
@@ -66,14 +60,10 @@ def fetch_active_users(db):
     return users
 
 def parse_and_filter_job(job_description, title, company, default_url, user_search_terms):
-    """Uses Gemini to evaluate the job with rotating API keys and fallback logic."""
-    if not KEY_POOL:
+    """Uses Gemini to evaluate the job with a 5-Key Waterfall Fallback logic."""
+    if not VALID_KEYS:
         return {"is_match": False, "reason": "System Error: No Gemini API keys configured."}
         
-    # Grab the next available key from the pool
-    current_key = next(KEY_POOL)
-    client = genai.Client(api_key=current_key)
-    
     terms_string = ", ".join(user_search_terms)
     
     # Check if description is missing or too short
@@ -106,17 +96,24 @@ def parse_and_filter_job(job_description, title, company, default_url, user_sear
     }}
     """
     
-    try:
-        # Utilizing the faster Flash-Lite model for high-volume processing
-        response = client.models.generate_content(
-            model="gemini-3.1-flash-lite",
-            contents=prompt,
-            config={"response_mime_type": "application/json"}
-        )
-        return json.loads(response.text)
-    except Exception as e:
-        print(f"Gemini API Error (Using key ending in ...{current_key[-4:]}): {e}")
-        return {"is_match": False, "reason": "AI processing failed."}
+    # --- The Waterfall Fallback Loop ---
+    for idx, key in enumerate(VALID_KEYS):
+        try:
+            client = genai.Client(api_key=key)
+            response = client.models.generate_content(
+                model="gemini-3.1-flash-lite",
+                contents=prompt,
+                config={"response_mime_type": "application/json"}
+            )
+            # If successful, return immediately and skip the remaining keys
+            return json.loads(response.text)
+        
+        except Exception as e:
+            print(f"Key {idx + 1} failed: {e}. Cascading to next key...")
+            time.sleep(1) # Tiny pause before hitting the next API key
+            
+    # If the loop finishes and ALL keys failed, trigger the final error response
+    return {"is_match": False, "reason": "AI processing failed. All available API keys hit their rate limits."}
 
 def save_to_database(db, job_data, chat_id):
     """Saves the record to Firestore, tracking duplicates per user."""
@@ -154,7 +151,7 @@ def send_telegram_message(message, chat_id):
         print(f"Telegram Error sending to {chat_id}: {e}")
 
 def main():
-    if not KEY_POOL:
+    if not VALID_KEYS:
         print("CRITICAL: No valid Gemini API keys found. Halting execution.")
         return
 
