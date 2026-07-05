@@ -1,6 +1,8 @@
 import os
 import json
 import base64
+import time
+import itertools
 from datetime import datetime
 import requests
 from jobspy import scrape_jobs
@@ -10,8 +12,23 @@ from google.oauth2 import service_account
 
 # --- Configuration & Secrets ---
 TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
-GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
 FIREBASE_CREDS_JSON = os.environ.get("FIREBASE_SERVICE_ACCOUNT")
+
+# --- API Key Pool Setup ---
+# Add as many keys as you want to this list in your GitHub Secrets
+API_KEYS = [
+    os.environ.get("GEMINI_API_KEY_1"),
+    os.environ.get("GEMINI_API_KEY_2"),
+    os.environ.get("GEMINI_API_KEY_3")
+]
+
+# Filter out empty keys and create an infinite rotating pool
+VALID_KEYS = [key for key in API_KEYS if key and key.strip()]
+if VALID_KEYS:
+    KEY_POOL = itertools.cycle(VALID_KEYS)
+else:
+    KEY_POOL = None
+
 
 def get_firestore_client():
     """Initializes Firestore, handling both Base64 and raw JSON formats."""
@@ -47,11 +64,17 @@ def fetch_active_users(db):
     return users
 
 def parse_and_filter_job(job_description, title, company, default_url, user_search_terms):
-    """Uses Gemini to evaluate the job, with fallback logic for missing descriptions."""
-    client = genai.Client(api_key=GEMINI_API_KEY)
+    """Uses Gemini to evaluate the job with rotating API keys and fallback logic."""
+    if not KEY_POOL:
+        return {"is_match": False, "reason": "System Error: No Gemini API keys configured."}
+        
+    # Grab the next available key from the pool
+    current_key = next(KEY_POOL)
+    client = genai.Client(api_key=current_key)
+    
     terms_string = ", ".join(user_search_terms)
     
-    # Check if description is missing or too short (less than 20 characters)
+    # Check if description is missing or too short
     desc_text = job_description if job_description and len(str(job_description).strip()) > 20 else "DESCRIPTION_MISSING"
     
     prompt = f"""
@@ -82,6 +105,7 @@ def parse_and_filter_job(job_description, title, company, default_url, user_sear
     """
     
     try:
+        # Utilizing the faster Flash-Lite model for high-volume processing
         response = client.models.generate_content(
             model="gemini-3.1-flash-lite",
             contents=prompt,
@@ -89,7 +113,7 @@ def parse_and_filter_job(job_description, title, company, default_url, user_sear
         )
         return json.loads(response.text)
     except Exception as e:
-        print(f"Gemini API Error: {e}")
+        print(f"Gemini API Error (Using key ending in ...{current_key[-4:]}): {e}")
         return {"is_match": False, "reason": "AI processing failed."}
 
 def save_to_database(db, job_data, chat_id):
@@ -98,7 +122,6 @@ def save_to_database(db, job_data, chat_id):
         return False
         
     try:
-        # Include chat_id so duplicates are tracked per person
         doc_id = f"{chat_id}_{job_data['Company']}_{job_data['Title']}_{job_data['Date']}".replace(" ", "_").replace("/", "-")
         doc_ref = db.collection("job_applications").document(doc_id)
         
@@ -129,6 +152,10 @@ def send_telegram_message(message, chat_id):
         print(f"Telegram Error sending to {chat_id}: {e}")
 
 def main():
+    if not KEY_POOL:
+        print("CRITICAL: No valid Gemini API keys found. Halting execution.")
+        return
+
     db = get_firestore_client()
     if not db:
         print("CRITICAL: Database failed to initialize.")
@@ -142,7 +169,6 @@ def main():
     print(f"Found {len(users)} active users. Starting batch processing...")
     today_str = datetime.today().strftime('%d-%m-%Y')
 
-    # Loop through every registered person
     for user in users:
         chat_id = user.get("chat_id")
         user_name = user.get("name", "User")
@@ -230,10 +256,13 @@ def main():
             else:
                 print(f"Skipped duplicate alert for {company}.")
                 
+            # Pauses the loop for 4 seconds so Google doesn't block us for spamming.
+            time.sleep(4)
+                
         print(f"Finished processing for {user_name}: {match_count} relevant matches.")
 
 if __name__ == "__main__":
-    if not all([TELEGRAM_BOT_TOKEN, GEMINI_API_KEY, FIREBASE_CREDS_JSON]):
-        print("CRITICAL: Missing one or more API keys in environment variables!")
+    if not all([TELEGRAM_BOT_TOKEN, FIREBASE_CREDS_JSON]):
+        print("CRITICAL: Missing Core API keys in environment variables!")
     else:
         main()
