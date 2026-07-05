@@ -129,7 +129,7 @@ def parse_and_filter_job(job_description, title, company, default_url, user_sear
                 last_error = str(e)
             print(f"Key {idx + 1} failed: {last_error[:200]}... Cascading to next key...")
             time.sleep(2) 
-            except (json.JSONDecodeError, KeyError) as e:
+        except (json.JSONDecodeError, KeyError) as e:
             last_error = "Failed to parse JSON from AI response."
             print(f"Key {idx + 1} returned invalid JSON. Cascading to next key...")
             time.sleep(2)
