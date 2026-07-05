@@ -56,7 +56,7 @@ def fetch_active_users(db):
 def parse_and_filter_job(job_description, title, company, default_url, user_search_terms):
     """Uses OpenRouter's Llama 3.3 70B model to evaluate jobs with fallback logic."""
     if not VALID_KEYS:
-        return {"is_match": False, "reason": "System Error: No OpenRouter API keys configured."}
+        return {"is_match": False, "ai_failed": True, "reason": "System Error: No OpenRouter API keys configured.", "email": "-", "phone": "-", "link": default_url}
         
     terms_string = ", ".join(user_search_terms)
     desc_text = job_description if job_description and len(str(job_description).strip()) > 20 else "DESCRIPTION_MISSING"
@@ -89,7 +89,6 @@ def parse_and_filter_job(job_description, title, company, default_url, user_sear
     """
     
     last_error = ""
-    # Using the specific high-intelligence model requested
     model_to_use = "meta-llama/llama-3.3-70b-instruct:free"
 
     for idx, key in enumerate(VALID_KEYS):
@@ -107,22 +106,22 @@ def parse_and_filter_job(job_description, title, company, default_url, user_sear
                     "messages": [{"role": "user", "content": prompt}],
                     "response_format": {"type": "json_object"}
                 },
-                timeout=20  # Increased to 20s to accommodate the 70B model's response time
+                timeout=20  
             )
             
             response.raise_for_status() 
             
-            # Extract text and clean up any accidental markdown blocks
             result_text = response.json()['choices'][0]['message']['content'].strip()
             if result_text.startswith("```json"):
                 result_text = result_text[7:-3].strip()
             elif result_text.startswith("```"):
                 result_text = result_text[3:-3].strip()
                 
-            return json.loads(result_text)
+            parsed_json = json.loads(result_text)
+            parsed_json["ai_failed"] = False # Tag to confirm successful AI processing
+            return parsed_json
         
         except requests.exceptions.RequestException as e:
-            # Capture the exact OpenRouter error body if they reject the request
             if hasattr(e, 'response') and e.response is not None:
                 last_error = f"{e.response.status_code} - {e.response.text}"
             else:
@@ -134,7 +133,15 @@ def parse_and_filter_job(job_description, title, company, default_url, user_sear
             print(f"Key {idx + 1} returned invalid JSON. Cascading to next key...")
             time.sleep(2)
             
-    return {"is_match": False, "reason": f"AI processing failed. Exact error: {last_error[:100]}"}
+    # FAIL-SAFE TRIGGERED: All keys failed. Return the raw data and flag it as a failure.
+    return {
+        "is_match": False, 
+        "ai_failed": True, 
+        "reason": f"AI processing failed. Exact error: {last_error[:100]}",
+        "email": "-",
+        "phone": "-",
+        "link": default_url
+    }
 
 def save_to_database(db, job_data, chat_id):
     """Saves the record to Firestore, tracking duplicates per user."""
@@ -203,34 +210,57 @@ def main():
             title = row.get('title', 'Unknown Title')
             company = row.get('company', 'Unknown Company')
             job_url = row.get('job_url', '#')
+            job_location = row.get('location', 'Unknown Location')
             description = row.get('description', '')
             
             extracted = parse_and_filter_job(description, title, company, job_url, search_terms)
             is_match = extracted.get("is_match", False)
+            ai_failed = extracted.get("ai_failed", False) # Check if the fail-safe was triggered
             reason = extracted.get("reason", "No reason provided.")
             
-            if is_match: match_count += 1
+            if is_match and not ai_failed: 
+                match_count += 1
             
             job_record = {
                 "Date": today_str, "User": user_name, "Type": "Email", 
-                "Application Status": "Applied" if is_match else "Rejected by AI",
+                "Application Status": "Applied" if is_match else ("AI Failed" if ai_failed else "Rejected by AI"),
                 "Link": extracted.get("link", job_url), "Email": extracted.get("email", "-"),
                 "Phone": extracted.get("phone", "-"), "Company": company, "Title": title,
                 "Is Match": is_match, "Reason": reason
             }
             
             if save_to_database(db, job_record, chat_id):
-                if is_match:
-                    msg = (f"🚨 <b>New Job Match for {user_name}!</b>\n\n💼 <b>Role:</b> {title}\n"
-                           f"🏢 <b>Company:</b> {company}\n📧 <b>HR Email:</b> {job_record['Email']}\n\n"
-                           f"✅ <b>Why it matches:</b> {reason}\n\n<a href='{job_record['Link']}'>Apply Here</a>")
+                
+                # Condition 2: If AI Processing Fails (Fail-Safe Message)
+                if ai_failed:
+                    msg = (f"⚠️ <b>[AI Processing Failed] Manual Review Required</b>\n\n"
+                           f"<i>The AI is currently overloaded, but here is the raw job info so you don't miss out:</i>\n\n"
+                           f"💼 <b>Role:</b> {title}\n"
+                           f"🏢 <b>Company:</b> {company}\n"
+                           f"📍 <b>Location:</b> {job_location}\n\n"
+                           f"<a href='{job_record['Link']}'>View Job Description & Apply</a>")
+                
+                # Condition 3: AI Succeeds and finds a Match
+                elif is_match:
+                    msg = (f"🚨 <b>New Job Match for {user_name}!</b>\n\n"
+                           f"💼 <b>Role:</b> {title}\n"
+                           f"🏢 <b>Company:</b> {company}\n"
+                           f"📍 <b>Location:</b> {job_location}\n"
+                           f"📧 <b>HR Email:</b> {job_record['Email']}\n\n"
+                           f"✅ <b>Why it matches:</b> {reason}\n\n"
+                           f"<a href='{job_record['Link']}'>Apply Here</a>")
+                
+                # Condition 1: AI Succeeds and Rejects it
                 else:
-                    msg = (f"⚠️ <b>Irrelevant Job Found for {user_name}</b>\n\n💼 <b>Role:</b> {title}\n"
-                           f"🏢 <b>Company:</b> {company}\n\n❌ <b>Why it was rejected:</b> {reason}\n\n"
+                    msg = (f"❌ <b>Irrelevant Job Found for {user_name}</b>\n\n"
+                           f"💼 <b>Role:</b> {title}\n"
+                           f"🏢 <b>Company:</b> {company}\n"
+                           f"📍 <b>Location:</b> {job_location}\n\n"
+                           f"❌ <b>Why it was rejected:</b> {reason}\n\n"
                            f"<a href='{job_record['Link']}'>View Anyway</a>")
                     
                 send_telegram_message(msg, chat_id)
-                print(f"Sent alert to {user_name} for {company}.")
+                print(f"Sent alert to {user_name} for {company} (AI Failed: {ai_failed}).")
                 
             time.sleep(3) # Short pause to respect OpenRouter rate limits
                 
